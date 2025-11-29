@@ -1,192 +1,179 @@
 // server.js
 import express from 'express';
 import dotenv from 'dotenv';
-import fs from 'fs';
-import basicAuth from 'basic-auth';
 import axios from 'axios';
 import crypto from 'crypto';
-import { ensureFolder, shareFolder } from './pcloud.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// --- Парсинг тела запроса (JSON и form-data) ---
-app.use(
-  express.json({
-    type: ['application/json', 'application/*+json', 'text/json'],
-  })
-);
-app.use(
-  express.urlencoded({
-    extended: true,
-  })
-);
+// Парсим JSON-тело
+app.use(express.json());
 
-// --- Простейший логгер в файл ws.log ---
-function logLine(line) {
-  try {
-    console.log(`[WEBHOOK] ${new Date().toISOString()} ${line}`);
-  } catch (e) {
-    // если даже лог упал, не мешаем основной логике
-    console.error('LOG ERROR:', e.message);
-  }
+// Простой логгер в stdout (Render его и показывает)
+function log(...args) {
+  console.log('[WEBHOOK]', new Date().toISOString(), ...args);
 }
 
-// --- Basic Auth для защиты вебхука ---
-function checkBasicAuth(req, res, next) {
-  const expectedUser = process.env.WEBHOOK_USER;
-  const expectedPass = process.env.WEBHOOK_PASS;
+// ==== CONFIG CHECKS ====
 
-  if (!expectedUser || !expectedPass) {
-    console.warn(
-      '[WARN] WEBHOOK_USER / WEBHOOK_PASS не заданы, Basic Auth фактически выключен'
-    );
-    return next();
-  }
-
-  const user = basicAuth(req);
-
-  if (!user || user.name !== expectedUser || user.pass !== expectedPass) {
-    res.set('WWW-Authenticate', 'Basic realm="Webhook"');
-    return res.status(401).send('Access denied');
-  }
-
-  return next();
+if (!process.env.WS_BASE_URL || !process.env.WS_API_KEY) {
+  console.warn('[WARN] WS_BASE_URL / WS_API_KEY не заданы — Worksection API работать не будет');
 }
 
-// --- Основной маршрут для Worksection webhook ---
-app.post('/ws-pcloud-hook', checkBasicAuth, async (req, res) => {
-  const rawBody = JSON.stringify(req.body);
-  logLine(`Incoming webhook: ${rawBody}`);
+if (!process.env.PCLOUD_BASE_URL) {
+  console.warn('[WARN] PCLOUD_BASE_URL не задан, использую https://eapi.pcloud.com по умолчанию');
+}
 
-  // Worksection ожидает быстрый ответ {"status":"OK"}
-  res.status(200).json({ status: 'OK' });
+if (!process.env.WEBHOOK_USER || !process.env.WEBHOOK_PASS) {
+  console.warn('[WARN] WEBHOOK_USER / WEBHOOK_PASS не заданы, Basic Auth фактически выключен');
+}
 
-  // Всё остальное делаем асинхронно, чтобы не блокировать ответ
-  try {
-    await handleWebhook(req.body);
-  } catch (err) {
-    logLine(`Error in handleWebhook: ${err.stack || err.message}`);
+// ==== BASIC AUTH ДЛЯ ВЕБХУКА ====
+
+function checkBasicAuth(req) {
+  const user = process.env.WEBHOOK_USER;
+  const pass = process.env.WEBHOOK_PASS;
+
+  if (!user || !pass) {
+    // защита выключена
+    return true;
   }
-});
 
-// --- Основная логика обработки webhook ---
-async function handleWebhook(payload) {
-  // Определяем тип события
-  const event = payload.event || payload.action || null;
+  const auth = req.headers['authorization'];
+  if (!auth || !auth.startsWith('Basic ')) return false;
 
-  if (event !== 'post_project') {
-    logLine(`Skip event: ${event}`);
+  const decoded = Buffer.from(auth.split(' ')[1] || '', 'base64').toString('utf8');
+  const [u, p] = decoded.split(':');
+  return u === user && p === pass;
+}
+
+// ==== PCloud: авторизация и операции с папками ====
+
+const PCLOUD_BASE = (process.env.PCLOUD_BASE_URL || 'https://eapi.pcloud.com').replace(/\/$/, '');
+
+// пример: мы логинимся логин/пароль + getauth, забираем token и дальше используем auth=<token>
+async function pcloudLoginOnce() {
+  if (process.env.PCLOUD_AUTH) {
+    // если ты заранее положил токен в .env
+    return process.env.PCLOUD_AUTH;
+  }
+
+  const username = process.env.PCLOUD_USERNAME;
+  const password = process.env.PCLOUD_PASSWORD;
+
+  if (!username || !password) {
+    throw new Error('PCLOUD_USERNAME / PCLOUD_PASSWORD не заданы и нет PCLOUD_AUTH_TOKEN');
+  }
+
+  const params = {
+    getauth: 1,
+    username,
+    password,
+  };
+
+  const url = `${PCLOUD_BASE}/userinfo`;
+
+  const res = await axios.get(url, { params });
+  if (res.data.result !== 0) {
+    throw new Error(`pCloud login failed: result=${res.data.result}, message=${res.data.error || res.data.message}`);
+  }
+
+  const token = res.data.auth;
+  if (!token) {
+    throw new Error('pCloud: не получили auth token в userinfo');
+  }
+
+  log('pCloud login OK, token obtained');
+  return token;
+}
+
+// Создание/получение папки по path через createfolderifnotexists
+async function ensurePcloudFolder(authToken, path) {
+  const url = `${PCLOUD_BASE}/createfolderifnotexists`;
+  const res = await axios.get(url, {
+    params: {
+      auth: authToken,
+      path,
+    },
+  });
+
+  if (res.data.result !== 0) {
+    throw new Error(`pCloud createfolderifnotexists error: ${JSON.stringify(res.data)}`);
+  }
+
+  const folder = res.data.metadata || res.data;
+  return folder;
+}
+
+// Шарим папку по email’ам (sharefolder)
+async function sharePcloudFolder(authToken, folderPath, emails) {
+  if (!emails.length) {
+    log('sharePcloudFolder: нет ни одного email, шарить некого — пропускаю');
     return;
   }
 
-  // Берём ID проекта
-  const projectId = payload.project_id || (payload.project && payload.project.id);
+  // сначала получим папку, чтобы у неё был folderid
+  const ensureRes = await axios.get(`${PCLOUD_BASE}/createfolderifnotexists`, {
+    params: {
+      auth: authToken,
+      path: folderPath,
+    },
+  });
 
-  if (!projectId) {
-    logLine('No project_id in payload');
-    return;
+  if (ensureRes.data.result !== 0) {
+    throw new Error(`pCloud ensure folder before share error: ${JSON.stringify(ensureRes.data)}`);
   }
 
-  logLine(`Processing project_id=${projectId}`);
-
-  // 1. Тянем проект из Worksection API
-  const project = await fetchWorksectionProject(projectId);
-
-  // ВАЖНО: структура зависит от реального ответа Worksection.
-  // Здесь предполагаем, что нужные поля лежат в project.data.*
-  const projectName =
-    (project?.data?.name && String(project.data.name).trim()) ||
-    `project-${projectId}`;
-
-  // members — строка "user1@mail.com,user2@mail.com,..."
-  const membersRaw = project?.data?.members || '';
-  const memberEmails = membersRaw
-    .split(',')
-    .map((e) => e.trim())
-    .filter((e) => e.length > 0);
-
-  logLine(
-    `Project "${projectName}", members: ${JSON.stringify(memberEmails)}`
-  );
-
-  // 2. Строим структуру папок в pCloud
-  const baseRoot = '/WorksectionProjects';
-  const projectFolderSafe = sanitizeName(projectName);
-
-  // Корневая папка для всех проектов
-  await ensureFolder(baseRoot);
-
-  // Папка проекта
-  const projectPath = `${baseRoot}/${projectFolderSafe}`;
-  await ensureFolder(projectPath);
-
-  // Папка Final_render
-  const finalRenderPath = `${projectPath}/Final_render`;
-  await ensureFolder(finalRenderPath);
-
-  // Папка Preview
-  const previewPath = `${projectPath}/Preview`;
-  await ensureFolder(previewPath);
-
-  // Внутри Preview — подпапка с текущей датой YYYY-MM-DD
-  const today = new Date().toISOString().slice(0, 10); // "2025-11-29"
-  const previewDatePath = `${previewPath}/${today}`;
-  await ensureFolder(previewDatePath);
-
-  logLine(
-    `Created structure: ${projectPath}, ${finalRenderPath}, ${previewDatePath}`
-  );
-
-  // 3. Раздаём доступ всем участникам проекта по email
-  if (memberEmails.length === 0) {
-    logLine('No members found, skip sharing');
-    return;
+  const folderMeta = ensureRes.data.metadata || ensureRes.data;
+  const folderId = folderMeta.folderid;
+  if (!folderId) {
+    throw new Error('pCloud: не нашли folderid в ответе');
   }
 
-  // Шарим КОРНЕВУЮ папку проекта, чтобы они видели всё внутри
-  for (const mail of memberEmails) {
+  // sharefolder работает по одному email за вызов
+  for (const email of emails) {
     try {
-      const shareRes = await shareFolder(projectPath, mail, 3); // 3 = create+modify
-      logLine(
-        `Shared ${projectPath} with ${mail}: ${JSON.stringify(shareRes)}`
-      );
+      const resp = await axios.get(`${PCLOUD_BASE}/sharefolder`, {
+        params: {
+          auth: authToken,
+          folderid: folderId,
+          mail: email,
+          permissions: 7, // rwx, см. доку
+        },
+      });
+
+      if (resp.data.result !== 0) {
+        log(`pCloud sharefolder error for ${email}:`, resp.data);
+      } else {
+        log(`pCloud shared folder ${folderPath} with ${email}`);
+      }
     } catch (err) {
-      const errBody = err.response?.data
-        ? JSON.stringify(err.response.data)
-        : err.message;
-      logLine(`Error sharing ${projectPath} with ${mail}: ${errBody}`);
+      log(`pCloud sharefolder axios error for ${email}:`, err.message);
     }
   }
-
-  logLine(`Done for project_id=${projectId}`);
 }
 
-// --- Нормализация имени папки (убираем запрещённые символы) ---
+// ==== Worksection: запрос проекта по API (get_project) ====
+
 async function fetchWorksectionProject(projectId) {
   const baseUrl = process.env.WS_BASE_URL;
   const apiKey = process.env.WS_ADMIN_TOKEN;
 
   if (!baseUrl || !apiKey) {
-    throw new Error('WS_BASE_URL или WS_ADMIN_TOKEN не настроены в .env');
+    throw new Error('WS_BASE_URL / WS_API_KEY не заданы');
   }
 
-  // параметры запроса к admin v2 API:
-  // ?action=get_project&id_project=PROJECT_ID&extra=users
   const paramsObj = {
     action: 'get_project',
     id_project: projectId,
-    extra: 'users', // чтобы сразу получить команду проекта
+    extra: 'users', // чтобы вернуть список участников проекта
   };
 
-  // строка для hash
-  const queryParams = new URLSearchParams(paramsObj).toString();
-  const hash = crypto
-    .createHash('md5')
-    .update(queryParams + apiKey)
-    .digest('hex');
+  const queryString = new URLSearchParams(paramsObj).toString();
+  const hash = crypto.createHash('md5').update(queryString + apiKey).digest('hex');
 
   const finalParams = {
     ...paramsObj,
@@ -199,35 +186,113 @@ async function fetchWorksectionProject(projectId) {
   try {
     response = await axios.get(url, { params: finalParams });
   } catch (err) {
-    const errBody = err.response?.data
-      ? JSON.stringify(err.response.data)
-      : err.message;
-    throw new Error(
-      `Error fetching Worksection project ${projectId}: ${errBody}`
-    );
+    const body = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Worksection get_project error for id=${projectId}: ${body}`);
   }
-
-  if (!response.data) {
-    throw new Error(`Empty response from Worksection for project ${projectId}`);
-  }
-
-  // лог на всякий случай
-  console.log('WS get_project raw:', JSON.stringify(response.data, null, 2));
 
   if (response.data.status !== 'ok') {
-    throw new Error(
-      `Worksection API error: ${JSON.stringify(response.data)}`
-    );
+    throw new Error(`Worksection get_project returned error: ${JSON.stringify(response.data)}`);
   }
 
-  return response.data; // структура, как в доке: { status: "ok", data: { ... } }
+  return response.data; // { status: 'ok', data: { ... } }
 }
 
-// --- Старт сервера ---
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  logLine(`Server started on port ${PORT}`);
+// ==== Обработка ОДНОГО события вебхука ====
+
+async function handleWebhookEvent(event) {
+  const action = event?.action || null;
+  const objType = event?.object?.type || null;
+
+  log('Handle event:', { action, objType });
+
+  // Нас интересует только создание проекта
+  if (!(action === 'post' && objType === 'project')) {
+    log('Skip event (not project post):', action, objType);
+    return;
+  }
+
+  const projectId = event.object.id;
+  const projectTitleFromWebhook = event.new?.title || null;
+
+  log(`Project created in Worksection: id=${projectId}, title="${projectTitleFromWebhook}"`);
+
+  // 1) Забираем проект по API, включая команду (users)
+  const wsProjectResponse = await fetchWorksectionProject(projectId);
+  const projectData = wsProjectResponse.data || {};
+
+  const projectName = projectData.name || projectTitleFromWebhook || `project_${projectId}`;
+  const users = Array.isArray(projectData.users) ? projectData.users : [];
+
+  const emails = users
+    .map((u) => u.email)
+    .filter((e) => !!e);
+
+  log(`Worksection project ${projectId} team emails:`, emails);
+
+  // 2) Авторизуемся в pCloud
+  const authToken = await pcloudLoginOnce();
+
+  // 3) Создаём структуру папок:
+  // /WorksectionProjects/<ProjectName>/
+  //   Preview/<YYYY-MM-DD>/
+  //   Final_render/
+  const rootPath = '/WorksectionProjects';
+  const projectPath = `${rootPath}/${projectName}`;
+
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const dateStr = `${yyyy}-${mm}-${dd}`;
+
+  const previewPath = `${projectPath}/Preview/${dateStr}`;
+  const finalRenderPath = `${projectPath}/Final_render`;
+
+  await ensurePcloudFolder(authToken, rootPath);
+  await ensurePcloudFolder(authToken, projectPath);
+  await ensurePcloudFolder(authToken, previewPath);
+  await ensurePcloudFolder(authToken, finalRenderPath);
+
+  log(`pCloud folders ensured for project "${projectName}":`, {
+    projectPath,
+    previewPath,
+    finalRenderPath,
+  });
+
+  // 4) Шарим projectPath (или обе папки — как хочешь; пока шарим projectPath)
+  await sharePcloudFolder(authToken, projectPath, emails);
+
+  log(`Done handling project ${projectId}`);
+}
+
+// ==== HTTP endpoint для Worksection ====
+
+app.post('/ws-pcloud-hook', async (req, res) => {
+  // Сначала сразу отвечаем OK, как требует Worksection
+  res.status(200).json({ status: 'OK' });
+
+  if (!checkBasicAuth(req)) {
+    log('Basic Auth failed');
+    return;
+  }
+
+  const body = req.body;
+  log('Incoming webhook:', JSON.stringify(body));
+
+  // Worksection всегда шлёт МАССИВ событий
+  const events = Array.isArray(body) ? body : [body];
+
+  for (const ev of events) {
+    try {
+      await handleWebhookEvent(ev);
+    } catch (err) {
+      log('Error while handling event:', err.message);
+    }
+  }
 });
 
-export default app;
+// ==== Запуск сервера ====
 
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
