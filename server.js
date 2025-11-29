@@ -149,7 +149,8 @@ async function createProjectFolders(projectName, emails) {
   const dd = String(today.getDate()).padStart(2, '0');
   const dateStr = `${yyyy}-${mm}-${dd}`;
 
-  const previewPath = `${projectPath}/Preview/${dateStr}`;
+  const previewBasePath = `${projectPath}/Preview`;
+  const previewPath = `${previewBasePath}/${dateStr}`;
   const finalRenderPath = `${projectPath}/Final_render`;
 
   try {
@@ -161,6 +162,10 @@ async function createProjectFolders(projectName, emails) {
     logDebug('Creating project folder:', projectPath);
     const projectResult = await ensureFolder(projectPath);
     logDebug('Project folder result:', JSON.stringify(projectResult));
+
+    logDebug('Creating project folder:', previewBasePath);
+    const projectResult = await ensureFolder(previewBasePath);
+    logDebug('Project folder result:', JSON.stringify(previewBaseResult));
 
     logDebug('Creating preview folder:', previewPath);
     const previewResult = await ensureFolder(previewPath);
@@ -192,6 +197,7 @@ async function createProjectFolders(projectName, emails) {
     return {
       rootPath,
       projectPath,
+      previewBasePath,
       previewPath,
       finalRenderPath,
     };
@@ -331,3 +337,4 @@ process.on('unhandledRejection', (reason, promise) => {
   logError('Unhandled Rejection at:', promise);
   logError('Reason:', reason);
 });
+
