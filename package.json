@@ -1,0 +1,16 @@
+{
+  "name": "ws-pcloud-hook",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "basic-auth": "^2.0.1",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "ngrok": "^5.0.0-beta.2"
+  }
+}
