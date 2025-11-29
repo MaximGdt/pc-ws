@@ -19,12 +19,12 @@ function log(...args) {
 
 // ==== CONFIG CHECKS ====
 
-if (!process.env.WS_BASE_URL || !process.env.WS_API_KEY) {
-  console.warn('[WARN] WS_BASE_URL / WS_API_KEY не заданы — Worksection API работать не будет');
+if (!process.env.WS_BASE_URL || !process.env.WS_ADMIN_TOKEN) {
+  console.warn('[WARN] WS_BASE_URL / WS_ADMIN_TOKEN не заданы — Worksection API работать не будет');
 }
 
-if (!process.env.PCLOUD_BASE_URL) {
-  console.warn('[WARN] PCLOUD_BASE_URL не задан, использую https://eapi.pcloud.com по умолчанию');
+if (!process.env.PCLOUD_API) {
+  console.warn('[WARN] PCLOUD_API не задан, использую https://eapi.pcloud.com по умолчанию');
 }
 
 if (!process.env.WEBHOOK_USER || !process.env.WEBHOOK_PASS) {
@@ -52,7 +52,7 @@ function checkBasicAuth(req) {
 
 // ==== PCloud: авторизация и операции с папками ====
 
-const PCLOUD_BASE = (process.env.PCLOUD_BASE_URL || 'https://eapi.pcloud.com').replace(/\/$/, '');
+const PCLOUD_BASE = (process.env.PCLOUD_API || 'https://eapi.pcloud.com').replace(/\/$/, '');
 
 // пример: мы логинимся логин/пароль + getauth, забираем token и дальше используем auth=<token>
 async function pcloudLoginOnce() {
