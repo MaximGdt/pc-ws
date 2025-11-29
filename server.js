@@ -163,9 +163,9 @@ async function createProjectFolders(projectName, emails) {
     const projectResult = await ensureFolder(projectPath);
     logDebug('Project folder result:', JSON.stringify(projectResult));
 
-    logDebug('Creating project folder:', previewBasePath);
-    const projectResult = await ensureFolder(previewBasePath);
-    logDebug('Project folder result:', JSON.stringify(previewBaseResult));
+    logDebug('Creating preview base folder:', previewBasePath);
+    const previewBaseResult = await ensureFolder(previewBasePath);
+    logDebug('Preview base folder result:', JSON.stringify(previewBaseResult));
 
     logDebug('Creating preview folder:', previewPath);
     const previewResult = await ensureFolder(previewPath);
@@ -337,4 +337,5 @@ process.on('unhandledRejection', (reason, promise) => {
   logError('Unhandled Rejection at:', promise);
   logError('Reason:', reason);
 });
+
 
