@@ -4,7 +4,11 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:pcloud": "node test-pcloud.js",
+    "test:ws": "node test-ws.js",
+    "test:full": "node test-full-flow.js",
+    "dev": "node --watch server.js"
   },
   "dependencies": {
     "axios": "^1.7.0",
