@@ -27,7 +27,7 @@ app.use(
 // --- Простейший логгер в файл ws.log ---
 function logLine(line) {
   try {
-    fs.appendFileSync('ws.log', `${new Date().toISOString()} ${line}\n`);
+    console.log(`[WEBHOOK] ${new Date().toISOString()} ${line}`);
   } catch (e) {
     // если даже лог упал, не мешаем основной логике
     console.error('LOG ERROR:', e.message);
@@ -230,3 +230,4 @@ app.listen(PORT, () => {
 });
 
 export default app;
+
